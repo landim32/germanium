@@ -1,0 +1,95 @@
+name: Update Project Version
+
+on:
+  workflow_run:
+    workflows: ["Version and Tag"]
+    types:
+      - completed
+
+jobs:
+  update-csproj-version:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Get latest tag
+      id: get_version
+      run: |
+        TAG=$(git tag -l "v*" --sort=-version:refname | head -n 1)
+
+        if [ -z "$TAG" ]; then
+          echo "No tags found. Skipping."
+          echo "skip=true" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        VERSION="${TAG#v}"
+        echo "tag=$TAG" >> $GITHUB_OUTPUT
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "skip=false" >> $GITHUB_OUTPUT
+        echo "Latest tag: $TAG -> Version: $VERSION"
+
+    - name: Check current version in csproj
+      if: steps.get_version.outputs.skip == 'false'
+      id: check_current
+      run: |
+        VERSION="${{ steps.get_version.outputs.version }}"
+        CSPROJ="src/Germanium/Germanium.csproj"
+
+        CURRENT=$(grep -oP '<Version>\K[^<]+' "$CSPROJ" || echo "")
+        echo "Current version in csproj: $CURRENT"
+        echo "Target version: $VERSION"
+
+        if [ "$CURRENT" = "$VERSION" ]; then
+          echo "Version already up to date."
+          echo "needs_update=false" >> $GITHUB_OUTPUT
+        else
+          echo "Version needs update."
+          echo "needs_update=true" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Update project version
+      if: steps.get_version.outputs.skip == 'false' && steps.check_current.outputs.needs_update == 'true'
+      run: |
+        VERSION="${{ steps.get_version.outputs.version }}"
+        CSPROJ="src/Germanium/Germanium.csproj"
+
+        sed -i "s|<Version>.*</Version>|<Version>$VERSION</Version>|" "$CSPROJ"
+        echo "Updated $CSPROJ to version $VERSION"
+        cat "$CSPROJ"
+
+    - name: Commit and push
+      if: steps.get_version.outputs.skip == 'false' && steps.check_current.outputs.needs_update == 'true'
+      run: |
+        VERSION="${{ steps.get_version.outputs.version }}"
+
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        git add src/Germanium/Germanium.csproj
+        git commit -m "chore: bump version to $VERSION [skip ci]"
+        git push origin main
+
+    - name: Summary
+      run: |
+        if [ "${{ steps.get_version.outputs.skip }}" = "true" ]; then
+          echo "## Version Update Skipped" >> $GITHUB_STEP_SUMMARY
+          echo "No tags found." >> $GITHUB_STEP_SUMMARY
+        elif [ "${{ steps.check_current.outputs.needs_update }}" = "true" ]; then
+          echo "## Version Updated" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Version: \`${{ steps.get_version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Tag: \`${{ steps.get_version.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "## Version Already Up to Date" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Version: \`${{ steps.get_version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+        fi
